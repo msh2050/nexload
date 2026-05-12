@@ -1,0 +1,11 @@
+[project]
+name = "nexload"
+version = "1.0.0"
+description = "Linux download manager with browser integration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "msh2050" }]
+
+[project.scripts]
+nexload = "nexload.__main__:main"

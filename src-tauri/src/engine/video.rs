@@ -215,7 +215,7 @@ where
 
     let stdout = child.stdout.take().unwrap();
     let mut lines = BufReader::new(stdout).lines();
-    let mut last_path = String::new();
+    let _last_path = String::new();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let parts: Vec<&str> = line.split_whitespace().collect();

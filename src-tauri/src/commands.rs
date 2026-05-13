@@ -1,14 +1,13 @@
 use crate::{
-    engine::{direct::Aria2Client, video},
+    engine::video,
     settings::Settings,
-    store::{Db, DownloadRecord},
+    store::DownloadRecord,
     AppState,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use tauri::{AppHandle, State};
-use tokio::sync::Mutex;
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -288,7 +287,7 @@ pub async fn update_settings(
 
 #[tauri::command]
 pub async fn storage_stats(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StorageStats, String> {
     let db = state.db.lock().await;

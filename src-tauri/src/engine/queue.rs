@@ -3,7 +3,7 @@ use crate::{engine::direct::Aria2Client, store::Db};
 use chrono::Utc;
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize)]

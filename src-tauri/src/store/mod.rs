@@ -82,25 +82,29 @@ impl Db {
              FROM downloads WHERE status IN ('active','queued','paused')
              ORDER BY created_at DESC"
         )?;
-        stmt.query_map([], row_map)?.collect()
+        let rows: Result<Vec<_>> = stmt.query_map([], row_map)?.collect();
+        rows
     }
 
     pub fn list_completed(&self, kind: Option<&str>, limit: u32) -> Result<Vec<DownloadRecord>> {
-        let (filter, k_param): (&str, &dyn rusqlite::ToSql) = if let Some(k) = kind {
-            (" AND kind=?2", k)
+        if let Some(k) = kind {
+            let sql = format!(
+                "SELECT id,url,title,kind,size_bytes,path,host,thumbnail_b64,status,aria2_gid,created_at,completed_at
+                 FROM downloads WHERE status='completed' AND kind=?1 ORDER BY completed_at DESC LIMIT {}",
+                limit
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows: Result<Vec<_>> = stmt.query_map(params![k], row_map)?.collect();
+            rows
         } else {
-            ("", &"")
-        };
-        let sql = format!(
-            "SELECT id,url,title,kind,size_bytes,path,host,thumbnail_b64,status,aria2_gid,created_at,completed_at
-             FROM downloads WHERE status='completed'{} ORDER BY completed_at DESC LIMIT {}",
-            filter, limit
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        if kind.is_some() {
-            stmt.query_map(params![k_param], row_map)?.collect()
-        } else {
-            stmt.query_map([], row_map)?.collect()
+            let sql = format!(
+                "SELECT id,url,title,kind,size_bytes,path,host,thumbnail_b64,status,aria2_gid,created_at,completed_at
+                 FROM downloads WHERE status='completed' ORDER BY completed_at DESC LIMIT {}",
+                limit
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows: Result<Vec<_>> = stmt.query_map([], row_map)?.collect();
+            rows
         }
     }
 
@@ -113,10 +117,10 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT kind, COALESCE(SUM(size_bytes),0) FROM downloads WHERE status='completed' GROUP BY kind"
         )?;
-        let map: std::collections::HashMap<String, i64> = stmt
+        let pairs: Result<Vec<(String, i64)>> = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            .filter_map(|r| r.ok())
             .collect();
+        let map = pairs?.into_iter().collect();
         Ok((total, map))
     }
 }

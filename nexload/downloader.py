@@ -1,9 +1,13 @@
+import os
+import signal
+import tempfile
 import threading
 import time
-import os
 import urllib.request
 import urllib.error
 from enum import Enum
+
+_TMP_DIR = os.path.join(tempfile.gettempdir(), "nexload_tmp")
 
 
 class Status(Enum):
@@ -15,8 +19,10 @@ class Status(Enum):
     CANCELLED = "Cancelled"
 
 
-CHUNK_PARTS = 8       # parallel connections per download
-CHUNK_SIZE = 256*1024 # bytes per read per thread
+CHUNK_PARTS = 8
+CHUNK_SIZE = 256 * 1024
+MAX_RETRIES = 8
+RETRY_DELAY = 5   # seconds between retries
 
 
 class Download:
@@ -30,6 +36,9 @@ class Download:
         self.total_size = 0
         self.downloaded = 0
         self.speed = 0.0        # bytes/sec
+        self.eta = -1           # seconds remaining (-1 = unknown)
+        self.connections = 0    # active parallel connections
+        self.final_path = None  # set when complete
         self.status = Status.PENDING
         self.error_msg = ""
 
@@ -38,14 +47,15 @@ class Download:
         self._pause_event.set()
         self._cancel_flag = False
         self._thread = None
+        self._proc = None       # subprocess.Popen for yt-dlp downloads
 
-        self.on_progress = None   # callback(download)
-        self.on_complete = None   # callback(download)
+        self.on_progress = None
+        self.on_complete = None
 
     @property
     def progress(self):
         if self.total_size > 0:
-            return self.downloaded / self.total_size
+            return min(self.downloaded / self.total_size, 1.0)
         return 0.0
 
     def start(self):
@@ -53,12 +63,24 @@ class Download:
         self._thread.start()
 
     def pause(self):
-        self._pause_event.clear()
+        if self._proc is not None:
+            try:
+                os.kill(self._proc.pid, signal.SIGSTOP)
+            except Exception:
+                pass
+        else:
+            self._pause_event.clear()
         self.status = Status.PAUSED
         self._notify()
 
     def resume(self):
-        self._pause_event.set()
+        if self._proc is not None:
+            try:
+                os.kill(self._proc.pid, signal.SIGCONT)
+            except Exception:
+                pass
+        else:
+            self._pause_event.set()
         if self.status == Status.PAUSED:
             self.status = Status.DOWNLOADING
             self._notify()
@@ -66,7 +88,22 @@ class Download:
     def cancel(self):
         self._cancel_flag = True
         self._pause_event.set()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
         self.status = Status.CANCELLED
+        self._notify()
+
+    def retry(self):
+        """Reset an errored HTTP download and restart it (resumes from partial file)."""
+        if self.status not in (Status.ERROR, Status.CANCELLED):
+            return
+        self._cancel_flag = False
+        self._pause_event.set()
+        self.error_msg = ""
+        self.status = Status.PENDING
         self._notify()
 
     def _notify(self):
@@ -98,35 +135,55 @@ class Download:
 
     def _run(self):
         self.status = Status.DOWNLOADING
-        filepath = os.path.join(self.dest_path, self.filename)
+        dest_file = os.path.join(self.dest_path, self.filename)
         os.makedirs(self.dest_path, exist_ok=True)
+        os.makedirs(_TMP_DIR, exist_ok=True)
         opener = self._build_opener()
 
-        try:
-            total, supports_range = self._head(opener)
-            self.total_size = total
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                total, supports_range = self._head(opener)
+                self.total_size = total
 
-            if supports_range and total > 0 and CHUNK_PARTS > 1:
-                self._download_parallel(opener, filepath, total)
-            else:
-                self._download_sequential(opener, filepath)
+                if supports_range and total > 0 and CHUNK_PARTS > 1:
+                    self._download_parallel(opener, dest_file, total)
+                else:
+                    self._download_sequential(opener, dest_file)
 
-            if not self._cancel_flag:
-                self.status = Status.COMPLETE
-                if self.on_complete:
-                    self.on_complete(self)
-        except Exception as e:
-            if not self._cancel_flag:
-                self.status = Status.ERROR
-                self.error_msg = str(e)
-                self._notify()
+                if not self._cancel_flag:
+                    self.final_path = dest_file
+                    self.status = Status.COMPLETE
+                    self.eta = 0
+                    if self.on_complete:
+                        self.on_complete(self)
+                return
 
-    def _download_sequential(self, opener, filepath):
-        tmp = filepath + ".nexload_tmp"
-        start_byte = 0
+            except Exception as e:
+                if self._cancel_flag:
+                    return
+                if attempt < MAX_RETRIES:
+                    self.error_msg = f"Connection lost, retrying ({attempt + 1}/{MAX_RETRIES})…"
+                    self._notify()
+                    for _ in range(RETRY_DELAY):
+                        if self._cancel_flag:
+                            return
+                        time.sleep(1)
+                    self.error_msg = ""
+                    self.status = Status.DOWNLOADING
+                else:
+                    self.status = Status.ERROR
+                    self.error_msg = str(e)
+                    self._notify()
 
-        if os.path.exists(tmp):
-            start_byte = os.path.getsize(tmp)
+    def _update_eta(self):
+        if self.speed > 0 and self.total_size > self.downloaded:
+            self.eta = int((self.total_size - self.downloaded) / self.speed)
+        else:
+            self.eta = -1
+
+    def _download_sequential(self, opener, dest_file):
+        tmp = os.path.join(_TMP_DIR, self.filename + ".part")
+        start_byte = os.path.getsize(tmp) if os.path.exists(tmp) else 0
 
         headers = {}
         if start_byte:
@@ -135,6 +192,7 @@ class Download:
         req = urllib.request.Request(self.url, headers=headers)
         speed_start = time.monotonic()
         speed_bytes = 0
+        self.connections = 1
 
         with opener.open(req, timeout=30) as resp, open(tmp, "ab") as f:
             self.downloaded = start_byte
@@ -154,11 +212,13 @@ class Download:
                     self.speed = speed_bytes / elapsed
                     speed_bytes = 0
                     speed_start = time.monotonic()
+                    self._update_eta()
                 self._notify()
 
-        os.replace(tmp, filepath)
+        self.connections = 0
+        os.replace(tmp, dest_file)
 
-    def _download_parallel(self, opener, filepath, total):
+    def _download_parallel(self, opener, dest_file, total):
         part_size = total // CHUNK_PARTS
         ranges = []
         for i in range(CHUNK_PARTS):
@@ -166,14 +226,17 @@ class Download:
             end = (start + part_size - 1) if i < CHUNK_PARTS - 1 else (total - 1)
             ranges.append((start, end))
 
-        tmp_parts = [f"{filepath}.part{i}" for i in range(CHUNK_PARTS)]
+        tmp_parts = [
+            os.path.join(_TMP_DIR, f"{self.filename}.part{i}")
+            for i in range(CHUNK_PARTS)
+        ]
 
-        # resume: skip already-complete parts
         resume_bytes = sum(
             os.path.getsize(p) if os.path.exists(p) else 0
             for p in tmp_parts
         )
         self.downloaded = resume_bytes
+        self.connections = CHUNK_PARTS
 
         errors = []
         threads = []
@@ -189,19 +252,22 @@ class Download:
         speed_start = time.monotonic()
         prev = self.downloaded
         while any(t.is_alive() for t in threads):
-            time.sleep(0.5)
+            time.sleep(0.4)
             elapsed = time.monotonic() - speed_start
-            cur = self.downloaded
-            self.speed = (cur - prev) / elapsed
-            prev = cur
-            speed_start = time.monotonic()
+            if elapsed > 0:
+                cur = self.downloaded
+                self.speed = (cur - prev) / elapsed
+                prev = cur
+                speed_start = time.monotonic()
+                self._update_eta()
+            self.connections = sum(1 for t in threads if t.is_alive())
             self._notify()
 
+        self.connections = 0
         if errors:
             raise errors[0]
 
-        # assemble
-        with open(filepath, "wb") as out:
+        with open(dest_file, "wb") as out:
             for part in tmp_parts:
                 with open(part, "rb") as f:
                     while True:

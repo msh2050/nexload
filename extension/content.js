@@ -55,14 +55,31 @@
 
   // ─────────────────────────────────────────── helpers
 
+  function makeSvgIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("fill", "currentColor");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M8 12l-5-5h3V2h4v5h3z");
+    const rect = document.createElementNS(NS, "rect");
+    rect.setAttribute("x", "2");
+    rect.setAttribute("y", "13");
+    rect.setAttribute("width", "12");
+    rect.setAttribute("height", "2");
+    rect.setAttribute("rx", "1");
+    svg.appendChild(path);
+    svg.appendChild(rect);
+    return svg;
+  }
+
   function makeButton(video) {
     const btn = document.createElement("button");
     btn.className = "nexload-btn";
-    btn.innerHTML =
-      `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 12l-5-5h3V2h4v5h3z"/>
-        <rect x="2" y="13" width="12" height="2" rx="1"/>
-       </svg>Download with NexLoad`;
+    btn.appendChild(makeSvgIcon());
+    btn.appendChild(document.createTextNode("Download with NexLoad"));
     btn.title = "Download this video with NexLoad";
     btn.addEventListener("click", (e) => {
       e.stopPropagation();

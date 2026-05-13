@@ -1,5 +1,8 @@
 import os
+import re
+import subprocess
 import threading
+import types
 import urllib.parse
 
 import gi
@@ -7,15 +10,54 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Gio, Pango
 
 from .download_manager import DownloadManager, DEFAULT_DOWNLOAD_DIR
-from .downloader import Status
+from .downloader import Download, Status
 from . import video_info
+
+
+# ══════════════════════════════════════════════════════════ helpers
+
+def _fmt_size(n):
+    if n <= 0:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _fmt_speed(bps):
+    if bps <= 0:
+        return ""
+    for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if bps < 1024:
+            return f"{bps:.1f} {unit}"
+        bps /= 1024
+    return f"{bps:.1f} GB/s"
+
+
+def _fmt_eta(secs):
+    if secs < 0:
+        return ""
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    return f"{h}h {m:02d}m"
+
+
+def _xdg_open(path):
+    try:
+        subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════ format chooser
 
 class FormatChooserDialog(Gtk.Dialog):
-    """Shows available video formats; user picks one."""
-
     def __init__(self, parent, title, formats):
         super().__init__(title="Select Format", transient_for=parent, modal=True)
         self.set_default_size(480, 400)
@@ -26,10 +68,8 @@ class FormatChooserDialog(Gtk.Dialog):
         self.set_default_response(Gtk.ResponseType.OK)
 
         box = self.get_content_area()
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
         box.set_spacing(8)
 
         lbl = Gtk.Label(label=f"<b>{GLib.markup_escape_text(title)}</b>",
@@ -37,7 +77,6 @@ class FormatChooserDialog(Gtk.Dialog):
         lbl.set_wrap(True)
         lbl.set_max_width_chars(55)
         box.append(lbl)
-
         box.append(Gtk.Separator())
 
         scroll = Gtk.ScrolledWindow()
@@ -47,21 +86,16 @@ class FormatChooserDialog(Gtk.Dialog):
         self._store = Gtk.StringList()
         self._formats = []
         for f in formats:
-            if f.has_video:       # show only video-bearing formats
+            if f.has_video:
                 self._formats.append(f)
                 self._store.append(f.label)
 
-        self._list_view_setup(scroll)
-
-    def _list_view_setup(self, scroll):
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._setup_item)
         factory.connect("bind", self._bind_item)
-
         selection = Gtk.SingleSelection(model=self._store)
         selection.set_selected(0)
         self._selection = selection
-
         lv = Gtk.ListView(model=selection, factory=factory)
         lv.set_show_separators(True)
         scroll.set_child(lv)
@@ -70,17 +104,13 @@ class FormatChooserDialog(Gtk.Dialog):
     def _setup_item(factory, item):
         label = Gtk.Label()
         label.set_xalign(0)
-        label.set_margin_start(8)
-        label.set_margin_end(8)
-        label.set_margin_top(6)
-        label.set_margin_bottom(6)
+        label.set_margin_start(8); label.set_margin_end(8)
+        label.set_margin_top(6); label.set_margin_bottom(6)
         item.set_child(label)
 
     @staticmethod
     def _bind_item(factory, item):
-        label = item.get_child()
-        string_obj = item.get_item()
-        label.set_text(string_obj.get_string())
+        item.get_child().set_text(item.get_item().get_string())
 
     def get_selected_format(self):
         idx = self._selection.get_selected()
@@ -102,16 +132,13 @@ class AddDownloadDialog(Gtk.Dialog):
         self.set_default_response(Gtk.ResponseType.OK)
 
         box = self.get_content_area()
-        box.set_margin_top(16)
-        box.set_margin_bottom(16)
-        box.set_margin_start(16)
-        box.set_margin_end(16)
+        box.set_margin_top(16); box.set_margin_bottom(16)
+        box.set_margin_start(16); box.set_margin_end(16)
         box.set_spacing(10)
 
         grid = Gtk.Grid(row_spacing=8, column_spacing=10)
         box.append(grid)
 
-        # URL
         grid.attach(Gtk.Label(label="URL:", xalign=1), 0, 0, 1, 1)
         self._url_entry = Gtk.Entry()
         self._url_entry.set_hexpand(True)
@@ -120,7 +147,6 @@ class AddDownloadDialog(Gtk.Dialog):
         self._url_entry.set_placeholder_text("https://…")
         grid.attach(self._url_entry, 1, 0, 1, 1)
 
-        # Save to
         grid.attach(Gtk.Label(label="Save to:", xalign=1), 0, 1, 1, 1)
         dest_box = Gtk.Box(spacing=6)
         self._dest_label = Gtk.Label(label=DEFAULT_DOWNLOAD_DIR, xalign=0)
@@ -132,7 +158,6 @@ class AddDownloadDialog(Gtk.Dialog):
         dest_box.append(browse_btn)
         grid.attach(dest_box, 1, 1, 1, 1)
 
-        # Filename (optional)
         grid.attach(Gtk.Label(label="Filename:", xalign=1), 0, 2, 1, 1)
         self._filename_entry = Gtk.Entry()
         self._filename_entry.set_hexpand(True)
@@ -176,39 +201,24 @@ class AddDownloadDialog(Gtk.Dialog):
         return name
 
 
-# ══════════════════════════════════════════════════════════ main window
-
-def _fmt_size(n):
-    if n <= 0:
-        return "—"
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-def _fmt_speed(bps):
-    if bps <= 0:
-        return ""
-    for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
-        if bps < 1024:
-            return f"{bps:.1f} {unit}"
-        bps /= 1024
-    return f"{bps:.1f} GB/s"
-
+# ══════════════════════════════════════════════════════════ download row
 
 class DownloadRow(Gtk.Box):
-    """One row in the download list."""
+    """One row per download with progress, stats and per-file action buttons."""
 
-    def __init__(self, dl):
+    def __init__(self, dl: Download, on_remove, on_retry=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.set_margin_top(6)
-        self.set_margin_bottom(6)
+        self.set_margin_top(8)
+        self.set_margin_bottom(8)
         self.set_margin_start(10)
         self.set_margin_end(10)
 
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._dl = dl
+        self._on_remove = on_remove
+        self._on_retry = on_retry
+
+        # ── row 1: name + size
+        top = Gtk.Box(spacing=8)
         self.append(top)
 
         self._name_lbl = Gtk.Label(label=dl.filename, xalign=0)
@@ -221,53 +231,156 @@ class DownloadRow(Gtk.Box):
         self._size_lbl.add_css_class("dim-label")
         top.append(self._size_lbl)
 
+        # ── row 2: progress bar
         self._progress = Gtk.ProgressBar()
         self._progress.set_show_text(True)
         self.append(self._progress)
 
-        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.append(bottom)
+        # ── row 3: speed · ETA · connections
+        stats = Gtk.Box(spacing=12)
+        self.append(stats)
 
-        self._status_lbl = Gtk.Label(label=dl.status.value, xalign=0)
-        self._status_lbl.add_css_class("dim-label")
+        self._status_lbl = Gtk.Label(label="", xalign=0)
         self._status_lbl.set_hexpand(True)
-        bottom.append(self._status_lbl)
+        self._status_lbl.add_css_class("dim-label")
+        stats.append(self._status_lbl)
 
         self._speed_lbl = Gtk.Label(label="", xalign=1)
         self._speed_lbl.add_css_class("dim-label")
-        bottom.append(self._speed_lbl)
+        stats.append(self._speed_lbl)
 
-        self._dl = dl
+        self._eta_lbl = Gtk.Label(label="", xalign=1)
+        self._eta_lbl.add_css_class("dim-label")
+        stats.append(self._eta_lbl)
+
+        self._conn_lbl = Gtk.Label(label="", xalign=1)
+        self._conn_lbl.add_css_class("dim-label")
+        stats.append(self._conn_lbl)
+
+        # ── row 4: action buttons
+        actions = Gtk.Box(spacing=6)
+        self.append(actions)
+
+        self._pause_btn = Gtk.Button(label="⏸ Pause")
+        self._pause_btn.connect("clicked", self._on_pause_resume)
+        actions.append(self._pause_btn)
+
+        self._stop_btn = Gtk.Button(label="⏹ Stop")
+        self._stop_btn.connect("clicked", self._on_stop)
+        self._stop_btn.add_css_class("destructive-action")
+        actions.append(self._stop_btn)
+
+        self._folder_btn = Gtk.Button(label="📁 Open Folder")
+        self._folder_btn.connect("clicked", self._on_open_folder)
+        actions.append(self._folder_btn)
+
+        self._file_btn = Gtk.Button(label="📄 Open File")
+        self._file_btn.connect("clicked", self._on_open_file)
+        actions.append(self._file_btn)
+
+        self._retry_btn = Gtk.Button(label="↺ Retry")
+        self._retry_btn.connect("clicked", self._on_retry_clicked)
+        actions.append(self._retry_btn)
+
+        self._remove_btn = Gtk.Button(label="✕ Remove")
+        self._remove_btn.connect("clicked", self._on_remove_clicked)
+        actions.append(self._remove_btn)
+
         self.refresh()
+
+    # ── button callbacks
+
+    def _on_pause_resume(self, btn):
+        dl = self._dl
+        if dl.status == Status.PAUSED:
+            dl.resume()
+        elif dl.status == Status.DOWNLOADING:
+            dl.pause()
+
+    def _on_stop(self, btn):
+        self._dl.cancel()
+
+    def _on_open_folder(self, btn):
+        path = self._dl.final_path or self._dl.dest_path
+        folder = os.path.dirname(path) if os.path.isfile(path) else path
+        _xdg_open(folder)
+
+    def _on_open_file(self, btn):
+        if self._dl.final_path and os.path.isfile(self._dl.final_path):
+            _xdg_open(self._dl.final_path)
+
+    def _on_retry_clicked(self, btn):
+        if self._on_retry:
+            self._on_retry(self._dl)
+
+    def _on_remove_clicked(self, btn):
+        self._on_remove(self._dl)
+
+    # ── refresh (called from main thread)
 
     def refresh(self):
         dl = self._dl
+        st = dl.status
+
         self._name_lbl.set_text(dl.filename)
         self._size_lbl.set_text(_fmt_size(dl.total_size))
-        self._progress.set_fraction(dl.progress)
-        pct = f"{dl.progress * 100:.1f}%"
-        self._progress.set_text(pct)
-        self._status_lbl.set_text(dl.status.value)
-        self._speed_lbl.set_text(_fmt_speed(dl.speed))
 
-        if dl.status == Status.ERROR:
+        pct = dl.progress * 100
+        self._progress.set_fraction(dl.progress)
+        self._progress.set_text(f"{pct:.1f}%")
+
+        # status label
+        if st == Status.ERROR:
             self._status_lbl.set_text(f"Error: {dl.error_msg}")
             self._status_lbl.add_css_class("error")
+        else:
+            self._status_lbl.remove_css_class("error")
+            self._status_lbl.set_text(st.value)
 
+        # speed / ETA / connections
+        if st == Status.DOWNLOADING:
+            self._speed_lbl.set_text(_fmt_speed(dl.speed))
+            eta = _fmt_eta(dl.eta)
+            self._eta_lbl.set_text(f"ETA {eta}" if eta else "")
+            conns = dl.connections
+            self._conn_lbl.set_text(f"{conns} conn" if conns > 1 else "")
+        else:
+            self._speed_lbl.set_text("")
+            self._eta_lbl.set_text("")
+            self._conn_lbl.set_text("")
+
+        # button states
+        active = st in (Status.DOWNLOADING, Status.PAUSED)
+        failed = st in (Status.ERROR, Status.CANCELLED)
+        self._pause_btn.set_visible(active)
+        self._stop_btn.set_visible(active)
+        self._pause_btn.set_label(
+            "▶ Resume" if st == Status.PAUSED else "⏸ Pause"
+        )
+        self._file_btn.set_sensitive(
+            st == Status.COMPLETE
+            and bool(dl.final_path)
+            and os.path.isfile(dl.final_path or "")
+        )
+        self._retry_btn.set_visible(failed and self._on_retry is not None and dl._proc is None)
+        self._remove_btn.set_visible(not active)
+
+
+# ══════════════════════════════════════════════════════════ main window
 
 class NexLoadWindow(Gtk.ApplicationWindow):
     def __init__(self, app, manager: DownloadManager, ws_server):
         super().__init__(application=app, title="NexLoad")
-        self.set_default_size(720, 480)
+        self.set_default_size(760, 520)
 
         self._manager = manager
         self._ws = ws_server
-        self._rows: dict = {}   # dl → DownloadRow
+        self._rows: dict = {}   # id(dl) → DownloadRow
 
         manager.connect_changed(self._on_downloads_changed)
         self._build_ui()
 
-    # ─────────────────────────────────────────────── build
+    # ─────────────────────────────────────────── build
 
     def _build_ui(self):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -281,7 +394,7 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         outer.append(scroll)
 
         self._list_box = Gtk.ListBox()
-        self._list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         self._list_box.set_show_separators(True)
         self._list_box.add_css_class("boxed-list")
         self._list_box.set_margin_top(8)
@@ -290,12 +403,12 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         self._list_box.set_margin_end(8)
         scroll.set_child(self._list_box)
 
-        self._placeholder = Gtk.Label(
+        placeholder = Gtk.Label(
             label="No downloads yet.\nClick  + Add  or use the browser extension."
         )
-        self._placeholder.add_css_class("dim-label")
-        self._placeholder.set_justify(Gtk.Justification.CENTER)
-        self._list_box.set_placeholder(self._placeholder)
+        placeholder.add_css_class("dim-label")
+        placeholder.set_justify(Gtk.Justification.CENTER)
+        self._list_box.set_placeholder(placeholder)
 
         outer.append(self._build_statusbar())
 
@@ -315,11 +428,9 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         return hb
 
     def _build_toolbar(self):
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bar.set_margin_top(4)
-        bar.set_margin_start(8)
-        bar.set_margin_end(8)
-        bar.set_margin_bottom(4)
+        bar = Gtk.Box(spacing=6)
+        bar.set_margin_top(4); bar.set_margin_start(8)
+        bar.set_margin_end(8); bar.set_margin_bottom(4)
 
         pause_btn = Gtk.Button(label="⏸ Pause All")
         pause_btn.connect("clicked", lambda _: self._manager.pause_all())
@@ -333,6 +444,11 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         clear_btn.connect("clicked", self._on_clear_done)
         bar.append(clear_btn)
 
+        tmp_btn = Gtk.Button(label="🗑 Clear Temp")
+        tmp_btn.set_tooltip_text("Delete partial/temp files from stopped downloads")
+        tmp_btn.connect("clicked", self._on_clear_temp)
+        bar.append(tmp_btn)
+
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
         self._ext_status = Gtk.Label(label="⬤  Extension: not connected")
@@ -342,19 +458,17 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         return bar
 
     def _build_statusbar(self):
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        bar = Gtk.Box()
         bar.add_css_class("toolbar")
-        bar.set_margin_start(8)
-        bar.set_margin_end(8)
-        bar.set_margin_top(4)
-        bar.set_margin_bottom(4)
+        bar.set_margin_start(8); bar.set_margin_end(8)
+        bar.set_margin_top(4); bar.set_margin_bottom(4)
 
         self._statusbar_lbl = Gtk.Label(label="Ready", xalign=0)
         self._statusbar_lbl.set_hexpand(True)
         bar.append(self._statusbar_lbl)
         return bar
 
-    # ─────────────────────────────────────────────── callbacks
+    # ─────────────────────────────────────────── callbacks
 
     def _on_add_clicked(self, btn):
         self._show_add_dialog()
@@ -373,18 +487,28 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def _start_download_or_video(self, url, filename, dest, referrer=""):
-        is_video = _looks_like_video_site(url)
-        if is_video:
-            self._fetch_formats_and_download(url, dest, referrer)
+        if _looks_like_video_site(url):
+            self._fetch_formats_and_download(url, dest or DEFAULT_DOWNLOAD_DIR, referrer)
         else:
-            self._manager.add(url, filename, dest, referrer=referrer or None)
+            self._manager.add(url, filename, dest or DEFAULT_DOWNLOAD_DIR,
+                              referrer=referrer or None)
+
+    def _download_stream_url(self, url, dest, referrer="", title=""):
+        """Download a captured M3U8/MPD stream directly with yt-dlp best format."""
+        if not title:
+            try:
+                path = urllib.parse.urlparse(url).path
+                title = os.path.splitext(os.path.basename(path))[0] or "video"
+            except Exception:
+                title = "video"
+        fmt = types.SimpleNamespace(format_id="best", ext="mp4", filesize=0)
+        self._run_ytdlp_download(url, fmt, title, dest)
 
     def _fetch_formats_and_download(self, url, dest, referrer=""):
         def _worker():
             try:
                 title, formats = video_info.get_formats(url)
-                GLib.idle_add(self._show_format_chooser, url, title,
-                              formats, dest)
+                GLib.idle_add(self._show_format_chooser, url, title, formats, dest)
             except Exception as e:
                 GLib.idle_add(self._show_error, f"Could not fetch formats:\n{e}")
 
@@ -395,36 +519,24 @@ class NexLoadWindow(Gtk.ApplicationWindow):
             self._show_error("No downloadable formats found.")
             return
         dialog = FormatChooserDialog(self, title, formats)
-        dialog.connect("response", self._on_format_response,
-                       url, title, formats, dest)
+        dialog.connect("response", self._on_format_response, url, title, formats, dest)
         dialog.present()
 
     def _on_format_response(self, dialog, response, url, title, formats, dest):
         if response == Gtk.ResponseType.OK:
             fmt = dialog.get_selected_format()
             if fmt:
-                self._start_video_download(url, fmt, title, dest)
+                self._run_ytdlp_download(url, fmt, title, dest)
         dialog.destroy()
 
-    def _start_video_download(self, url, fmt, title, dest):
+    def _run_ytdlp_download(self, url, fmt, title, dest):
         safe = "".join(c if c.isalnum() or c in " ._-()" else "_"
                        for c in title)[:80]
-        filename = f"{safe}.{fmt.ext}"
-        dl = self._manager.add(url, filename, dest)
-        # replace sequential download with yt-dlp subprocess
-        dl.cancel()
-        self._manager.remove(dl)
-
-        self._run_ytdlp_download(url, fmt.format_id, title, dest)
-
-    def _run_ytdlp_download(self, url, fmt_id, title, dest):
-        from .downloader import Download, Status
-        safe = "".join(c if c.isalnum() or c in " ._-()" else "_"
-                       for c in title)[:80]
-        dl = Download(url, dest, f"{safe}.*")
+        dl = Download(url, dest, f"{safe}.{fmt.ext}")
         dl.on_progress = self._manager._on_download_progress
         dl.on_complete = self._manager._on_download_complete
         dl.status = Status.DOWNLOADING
+        dl.total_size = fmt.filesize or 0
 
         with self._manager._lock:
             self._manager._downloads.append(dl)
@@ -432,29 +544,62 @@ class NexLoadWindow(Gtk.ApplicationWindow):
 
         def _worker():
             try:
-                def _prog(pct, speed):
+                def _prog(pct, speed_bps, eta_secs):
                     dl.downloaded = int(pct)
                     dl.total_size = 100
-                    dl.speed = 0
+                    dl.speed = speed_bps
+                    dl.eta = eta_secs
                     GLib.idle_add(self._manager._notify)
 
-                video_info.download_video(url, fmt_id, dest, on_progress=_prog)
-                dl.status = Status.COMPLETE
-                dl.downloaded = 100
-                dl.total_size = 100
+                def _on_proc(proc):
+                    dl._proc = proc
+
+                final = video_info.download_video(
+                    url, fmt.format_id, dest,
+                    on_progress=_prog,
+                    on_proc=_on_proc,
+                    title=title,
+                )
+                if not dl._cancel_flag:
+                    dl.status = Status.COMPLETE
+                    dl.downloaded = 100
+                    dl.total_size = 100
+                    dl.eta = 0
+                    dl.speed = 0
+                    dl.final_path = final
             except Exception as e:
-                dl.status = Status.ERROR
-                dl.error_msg = str(e)
+                if not dl._cancel_flag:
+                    dl.status = Status.ERROR
+                    dl.error_msg = str(e)
             GLib.idle_add(self._manager._notify)
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_clear_done(self, btn):
         done = [d for d in self._manager.downloads
-                if d.status in (Status.COMPLETE, Status.ERROR,
-                                Status.CANCELLED)]
+                if d.status in (Status.COMPLETE, Status.ERROR, Status.CANCELLED)]
         for d in done:
             self._manager.remove(d)
+
+    def _on_clear_temp(self, btn):
+        from .downloader import _TMP_DIR
+        active = {d.filename for d in self._manager.downloads
+                  if d.status in (Status.DOWNLOADING, Status.PAUSED)}
+        try:
+            deleted = 0
+            for name in os.listdir(_TMP_DIR):
+                base = name.split(".part")[0]
+                if base not in active:
+                    try:
+                        os.remove(os.path.join(_TMP_DIR, name))
+                        deleted += 1
+                    except Exception:
+                        pass
+            self._statusbar_lbl.set_text(
+                f"Deleted {deleted} temp file(s) from {_TMP_DIR}"
+            )
+        except FileNotFoundError:
+            self._statusbar_lbl.set_text("Temp folder is already empty.")
 
     def _show_error(self, msg):
         dialog = Gtk.AlertDialog()
@@ -462,29 +607,27 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         dialog.set_detail(msg)
         dialog.show(self)
 
-    # ─────────────────────────────────────────────── list refresh
+    # ─────────────────────────────────────────── list refresh
 
     def _on_downloads_changed(self):
         downloads = self._manager.downloads
-        dl_set = set(id(d) for d in downloads)
+        dl_ids = {id(d) for d in downloads}
 
-        # remove stale rows
-        for dl_id in list(self._rows):
-            if dl_id not in dl_set:
-                row_widget = self._rows.pop(dl_id)
-                self._list_box.remove(row_widget.get_parent() or row_widget)
+        for key in list(self._rows):
+            if key not in dl_ids:
+                row_widget = self._rows.pop(key)
+                parent = row_widget.get_parent()
+                self._list_box.remove(parent if parent else row_widget)
 
-        # add / refresh
         for dl in downloads:
             key = id(dl)
             if key in self._rows:
                 self._rows[key].refresh()
             else:
-                row = DownloadRow(dl)
+                row = DownloadRow(dl, self._manager.remove, self._manager.retry)
                 self._rows[key] = row
                 self._list_box.append(row)
 
-        # status bar
         active = [d for d in downloads if d.status == Status.DOWNLOADING]
         total_speed = sum(d.speed for d in active)
         if active:
@@ -495,34 +638,48 @@ class NexLoadWindow(Gtk.ApplicationWindow):
             txt = "Ready"
         self._statusbar_lbl.set_text(txt)
 
-    # ─────────────────────────────────────────────── extension callback
+    # ─────────────────────────────────────────── extension callbacks
 
     def handle_extension_message(self, client, msg):
-        """Called by WebSocket server on main thread (via GLib.idle_add)."""
         action = msg.get("action")
         url = msg.get("url", "")
         referrer = msg.get("referrer", "")
         filename = msg.get("filename", "")
+        title = msg.get("title", "")
 
         if action == "download":
             GLib.idle_add(
                 self._start_download_or_video, url, filename, None, referrer
             )
         elif action == "download_video":
-            GLib.idle_add(
-                self._fetch_formats_and_download, url,
-                DEFAULT_DOWNLOAD_DIR, referrer
-            )
+            if _is_direct_stream(url):
+                GLib.idle_add(
+                    self._download_stream_url, url,
+                    DEFAULT_DOWNLOAD_DIR, referrer, title
+                )
+            else:
+                GLib.idle_add(
+                    self._fetch_formats_and_download, url,
+                    DEFAULT_DOWNLOAD_DIR, referrer
+                )
 
-        self._ext_status.set_label("⬤  Extension: connected")
+    def notify_extension_connected(self):
+        GLib.idle_add(self._ext_status.set_label, "⬤  Extension: connected")
 
     def notify_extension_disconnected(self):
-        GLib.idle_add(
-            self._ext_status.set_label, "⬤  Extension: not connected"
-        )
+        GLib.idle_add(self._ext_status.set_label, "⬤  Extension: not connected")
+
+
+_STREAM_RE = re.compile(r'\.(m3u8|mpd)(\?|#|$)', re.IGNORECASE)
+
+
+def _is_direct_stream(url):
+    return bool(_STREAM_RE.search(url))
 
 
 def _looks_like_video_site(url):
+    if _is_direct_stream(url):
+        return True
     video_hosts = (
         "youtube.com", "youtu.be", "vimeo.com",
         "dailymotion.com", "twitch.tv", "tiktok.com",

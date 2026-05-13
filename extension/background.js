@@ -1,71 +1,6 @@
-/**
- * NexLoad background service worker.
- *
- * - Maintains a WebSocket connection to the NexLoad desktop app
- *   at ws://127.0.0.1:9119
- * - Registers context menus:
- *     "Download link with NexLoad"   (on links)
- *     "Download video with NexLoad"  (on video elements)
- * - Forwards download requests from content.js to the app
- */
-
 "use strict";
 
-const WS_URL = "ws://127.0.0.1:9119";
-const RECONNECT_DELAY_MS = 5000;
-
-// ─────────────────────────────────────────── WebSocket management
-
-let ws = null;
-let wsReady = false;
-let reconnectTimer = null;
-
-function connect() {
-  if (ws && ws.readyState <= WebSocket.OPEN) return;
-  try {
-    ws = new WebSocket(WS_URL);
-  } catch (e) {
-    scheduleReconnect();
-    return;
-  }
-
-  ws.onopen = () => {
-    wsReady = true;
-    clearTimeout(reconnectTimer);
-    setIcon(true);
-  };
-
-  ws.onclose = () => {
-    wsReady = false;
-    setIcon(false);
-    scheduleReconnect();
-  };
-
-  ws.onerror = () => {
-    wsReady = false;
-  };
-
-  ws.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      handleServerMessage(msg);
-    } catch (_) {}
-  };
-}
-
-function scheduleReconnect() {
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
-}
-
-function sendToApp(obj) {
-  if (wsReady && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-    return true;
-  }
-  // queue not implemented — just open NexLoad first
-  return false;
-}
+const SERVER_URL = "http://127.0.0.1:9119";
 
 // ─────────────────────────────────────────── icon / badge
 
@@ -75,6 +10,117 @@ function setIcon(connected) {
   });
   chrome.action.setBadgeText({ text: connected ? "" : "OFF" });
   chrome.action.setBadgeBackgroundColor({ color: connected ? "#1e7e34" : "#c0392b" });
+}
+
+// ─────────────────────────────────────────── HTTP communication
+
+async function pingServer() {
+  try {
+    const r = await fetch(`${SERVER_URL}/ping`, { method: "GET" });
+    if (r.ok) { setIcon(true); return true; }
+  } catch (_) {}
+  setIcon(false);
+  return false;
+}
+
+async function sendToApp(obj) {
+  try {
+    const r = await fetch(SERVER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(obj),
+    });
+    if (r.ok) { setIcon(true); return true; }
+  } catch (_) {}
+  setIcon(false);
+  return false;
+}
+
+// ─────────────────────────────────────────── video URL capture (like IDM / DownloadHelper)
+
+// tabId → [{url, type, size, ts}]
+const capturedVideos = new Map();
+
+// Match video/audio MIME types and playlist types
+const VIDEO_MIME_RE = /^(video|audio)\/|application\/(x-mpegurl|vnd\.apple\.mpegurl|dash\+xml)/i;
+// Match video file extensions in the URL
+const VIDEO_EXT_RE  = /\.(mp4|webm|mkv|m3u8|mpd|flv|avi|mov|m4v|m4a|mp3|ogg|opus)(\?|#|$)/i;
+// Skip tiny HLS/DASH segment files — we want the playlist, not chunks
+const SKIP_EXT_RE   = /\.(ts|m4s|cmfa|cmfv)(\?|#|$)/i;
+
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    const url = details.url;
+    if (SKIP_EXT_RE.test(url)) return;
+
+    const hdrs = details.responseHeaders || [];
+    const ct = (hdrs.find(h => h.name.toLowerCase() === "content-type") || {}).value || "";
+    const cl = parseInt((hdrs.find(h => h.name.toLowerCase() === "content-length") || {}).value || "0");
+
+    if (!VIDEO_MIME_RE.test(ct) && !VIDEO_EXT_RE.test(url)) return;
+
+    const list = capturedVideos.get(details.tabId) || [];
+    if (!list.find(v => v.url === url)) {
+      list.push({ url, type: ct, size: cl, ts: Date.now() });
+      if (list.length > 30) list.splice(0, list.length - 30);
+    }
+    capturedVideos.set(details.tabId, list);
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
+  ["responseHeaders"]
+);
+
+// Clear captured URLs when tab navigates or closes
+chrome.tabs.onRemoved.addListener(tabId => capturedVideos.delete(tabId));
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading") capturedVideos.delete(tabId);
+});
+
+function getBestCapturedUrl(tabId) {
+  const list = capturedVideos.get(tabId) || [];
+  if (!list.length) return null;
+  // Prefer M3U8 playlists (HLS master/index), then largest MP4, then most recent
+  const m3u8 = list.filter(v => /m3u8/i.test(v.url) || /mpegurl/i.test(v.type));
+  if (m3u8.length) return m3u8[m3u8.length - 1].url;
+  const sorted = [...list].sort((a, b) => (b.size || 0) - (a.size || 0));
+  return sorted[0].url;
+}
+
+// ─────────────────────────────────────────── URL resolution
+
+const KNOWN_VIDEO_HOSTS = [
+  "youtube.com", "youtu.be", "dailymotion.com", "vimeo.com",
+  "twitch.tv", "tiktok.com", "twitter.com", "x.com",
+  "facebook.com", "instagram.com", "reddit.com",
+];
+
+function resolveVideoUrl(msg, sender) {
+  if (msg.action !== "download_video") return msg.url;
+
+  const tabId = sender.tab?.id;
+  const tabUrl = sender.tab?.url || "";
+  const frameUrl = sender.url || "";
+
+  // 1. Best: use a URL we actually saw the browser request (like IDM does)
+  if (tabId != null) {
+    const captured = getBestCapturedUrl(tabId);
+    if (captured) return captured;
+  }
+
+  // 2. For known platforms (YouTube, Dailymotion…) yt-dlp needs the page URL
+  if (frameUrl && frameUrl !== tabUrl) {
+    try {
+      const tabHost = new URL(tabUrl).hostname;
+      if (KNOWN_VIDEO_HOSTS.some(h => tabHost === h || tabHost.endsWith("." + h))) {
+        return tabUrl;
+      }
+    } catch (_) {}
+    // Unknown aggregator site: use the embed/player iframe URL
+    return frameUrl;
+  }
+
+  return tabUrl || msg.url;
 }
 
 // ─────────────────────────────────────────── context menus
@@ -97,14 +143,9 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["selection"],
     });
   });
-  connect();
 });
 
-chrome.runtime.onStartup.addListener(() => {
-  connect();
-});
-
-// ─────────────────────────────────────────── context menu click handler
+// ─────────────────────────────────────────── context menu handler
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   const referrer = info.pageUrl || "";
@@ -112,31 +153,29 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "nexload_download_link") {
     const url = info.linkUrl;
     if (!url) return;
-    const filename = url.split("/").pop().split("?")[0] || "download";
     sendOrAlert(tab, {
       action: "download",
       url,
-      filename,
+      filename: url.split("/").pop().split("?")[0] || "download",
       referrer,
     });
+
   } else if (info.menuItemId === "nexload_download_video") {
-    // ask content script for the actual video src
-    chrome.tabs.sendMessage(
-      tab.id,
-      { action: "get_link" },
-      (resp) => {
-        const url = info.srcUrl || (resp && resp.href) || info.pageUrl;
-        sendOrAlert(tab, {
-          action: "download_video",
-          url,
-          referrer,
-          title: tab.title || "",
-        });
-      }
-    );
+    // Try captured network URLs first; fall back to frame/tab URL
+    const captured = getBestCapturedUrl(tab.id);
+    const frameUrl = info.pageUrl || tab.url;
+    const tabHost = (() => { try { return new URL(tab.url).hostname; } catch (_) { return ""; } })();
+    const useTabUrl = KNOWN_VIDEO_HOSTS.some(h => tabHost === h || tabHost.endsWith("." + h));
+    sendOrAlert(tab, {
+      action: "download_video",
+      url: captured || (useTabUrl ? tab.url : frameUrl),
+      referrer,
+      title: tab.title || "",
+    });
+
   } else if (info.menuItemId === "nexload_download_selection") {
-    const url = info.selectionText && info.selectionText.trim();
-    if (!url || !url.startsWith("http")) return;
+    const url = (info.selectionText || "").trim();
+    if (!url.startsWith("http")) return;
     sendOrAlert(tab, {
       action: "download",
       url,
@@ -146,14 +185,12 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-function sendOrAlert(tab, msg) {
-  if (!sendToApp(msg)) {
+async function sendOrAlert(tab, msg) {
+  const ok = await sendToApp(msg);
+  if (!ok) {
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () =>
-        alert(
-          "NexLoad is not running.\nPlease start NexLoad and try again."
-        ),
+      func: () => alert("NexLoad is not running.\nPlease start NexLoad and try again."),
     });
   }
 }
@@ -162,40 +199,26 @@ function sendOrAlert(tab, msg) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "download" || msg.action === "download_video") {
+    const url = resolveVideoUrl(msg, sender);
     const payload = {
       action: msg.action,
-      url: msg.url,
+      url,
       referrer: msg.referrer || sender.url || "",
-      title: msg.title || "",
+      title: msg.title || sender.tab?.title || "",
       filename: msg.filename || "",
     };
-    if (!sendToApp(payload)) {
-      // NexLoad not running — open app install page or show badge
-      chrome.action.setBadgeText({ text: "!" });
-      chrome.action.setBadgeBackgroundColor({ color: "#e67e22" });
-    }
+    sendToApp(payload).then((ok) => {
+      if (!ok && sender.tab) sendOrAlert(sender.tab, payload);
+    });
   }
-  // no response needed
 });
 
-// ─────────────────────────────────────────── server messages
-
-function handleServerMessage(msg) {
-  // future: server could ask extension to grab cookies etc.
-  if (msg.action === "ping") {
-    sendToApp({ action: "pong" });
-  }
-}
-
-// ─────────────────────────────────────────── keep-alive
+// ─────────────────────────────────────────── keepalive
 
 setIcon(false);
-connect();
+pingServer();
 
-// reconnect if the service worker wakes up
 chrome.alarms.create("nexload_keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "nexload_keepalive") {
-    connect();
-  }
+  if (alarm.name === "nexload_keepalive") pingServer();
 });

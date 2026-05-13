@@ -5,14 +5,13 @@ const statusEl = document.getElementById("status");
 const addBtn = document.getElementById("addBtn");
 const openBtn = document.getElementById("openBtn");
 
-// probe connection by attempting a WebSocket
-function checkConnection() {
-  return new Promise((resolve) => {
-    const ws = new WebSocket("ws://127.0.0.1:9119");
-    const timer = setTimeout(() => { ws.close(); resolve(false); }, 2000);
-    ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(true); };
-    ws.onerror = () => { clearTimeout(timer); resolve(false); };
-  });
+async function checkConnection() {
+  try {
+    const r = await fetch("http://127.0.0.1:9119/ping", { method: "GET" });
+    return r.ok;
+  } catch (_) {
+    return false;
+  }
 }
 
 checkConnection().then((connected) => {

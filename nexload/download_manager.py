@@ -1,17 +1,66 @@
+import json
 import os
 import threading
+
 from gi.repository import GLib
+
 from .downloader import Download, Status
 
 DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
 MAX_CONCURRENT = 3
+_HISTORY_FILE = os.path.expanduser("~/.local/share/nexload/history.json")
+
+
+def _save_history(downloads):
+    os.makedirs(os.path.dirname(_HISTORY_FILE), exist_ok=True)
+    records = []
+    for dl in downloads:
+        records.append({
+            "url": dl.url,
+            "filename": dl.filename,
+            "dest_path": dl.dest_path,
+            "final_path": dl.final_path,
+            "total_size": dl.total_size,
+            "status": dl.status.value,
+            "error_msg": dl.error_msg,
+        })
+    try:
+        with open(_HISTORY_FILE, "w") as f:
+            json.dump(records, f, indent=2)
+    except Exception:
+        pass
+
+
+def _load_history():
+    try:
+        with open(_HISTORY_FILE) as f:
+            records = json.load(f)
+    except Exception:
+        return []
+
+    downloads = []
+    status_map = {s.value: s for s in Status}
+    for r in records:
+        dl = Download(r["url"], r["dest_path"], r["filename"])
+        dl.final_path = r.get("final_path")
+        dl.total_size = r.get("total_size", 0)
+        dl.error_msg = r.get("error_msg", "")
+        # Only restore finished states; never re-run incomplete downloads
+        raw = r.get("status", "")
+        if raw in (Status.COMPLETE.value, Status.ERROR.value, Status.CANCELLED.value):
+            dl.status = status_map.get(raw, Status.CANCELLED)
+            dl.downloaded = dl.total_size
+        else:
+            dl.status = Status.CANCELLED
+        downloads.append(dl)
+    return downloads
 
 
 class DownloadManager:
     def __init__(self):
-        self._downloads = []       # ordered list of Download objects
+        self._downloads = _load_history()
         self._lock = threading.Lock()
-        self._on_changed = []      # GTK-safe callbacks
+        self._on_changed = []
 
     # ------------------------------------------------------------------ public
 
@@ -34,6 +83,10 @@ class DownloadManager:
             except ValueError:
                 pass
         self._notify()
+
+    def retry(self, dl):
+        dl.retry()
+        self._schedule()
 
     def pause_all(self):
         for dl in self._active():
@@ -72,6 +125,7 @@ class DownloadManager:
         GLib.idle_add(self._schedule)
 
     def _notify(self):
+        _save_history(self._downloads)
         for cb in self._on_changed:
             cb()
-        return False   # don't re-schedule idle callback
+        return False

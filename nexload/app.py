@@ -24,6 +24,8 @@ class NexLoadApp(Gtk.Application):
         if self._win is None:
             self._win = NexLoadWindow(self, self._manager, self._ws)
             self._ws.on_message(self._on_ws_message)
+            self._ws.on_connect(self._on_ws_connect)
+            self._ws.on_disconnect(self._on_ws_disconnect)
             self._ws.start()
         self._win.present()
 
@@ -36,3 +38,11 @@ class NexLoadApp(Gtk.Application):
     def _on_ws_message(self, client, msg):
         if self._win:
             self._win.handle_extension_message(client, msg)
+
+    def _on_ws_connect(self, client):
+        if self._win:
+            self._win.notify_extension_connected()
+
+    def _on_ws_disconnect(self, client):
+        if self._win:
+            self._win.notify_extension_disconnected()

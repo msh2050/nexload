@@ -2,7 +2,7 @@
 // All accept real data via props.
 
 // ── EMPTY STATE ───────────────────────────────────────────────
-function EmptyState({ onGrab, pasteUrl, onPasteChange }) {
+function EmptyState({ onGrab, pasteUrl, onPasteChange, onSettingsClick }) {
   const [input, setInput] = React.useState(pasteUrl || '');
   React.useEffect(() => { setInput(pasteUrl || ''); }, [pasteUrl]);
   const commit = () => { if (onGrab && input) onGrab(input); };
@@ -14,7 +14,7 @@ function EmptyState({ onGrab, pasteUrl, onPasteChange }) {
       background: 'linear-gradient(180deg, #1a1540 0%, #0a0a14 60%, #0f1a2a 100%)',
       display: 'flex', flexDirection: 'column', color: 'var(--ink-0)',
     }}>
-      <ChromeBar/>
+      <ChromeBar onSettingsClick={onSettingsClick}/>
       <Starfield count={70} width={1280} height={760}/>
 
       {/* Mountains */}
@@ -80,7 +80,7 @@ function EmptyState({ onGrab, pasteUrl, onPasteChange }) {
 }
 
 // ── COMPLETED LIBRARY ─────────────────────────────────────────
-function CompletedLibrary({ items = [], onNavChange }) {
+function CompletedLibrary({ items = [], onNavChange, onSettingsClick }) {
   const [filter, setFilter] = React.useState('All');
   const filters = ['All', 'Video', 'Music', 'Docs', 'Images'];
   const kindMap = { Video: 'video', Music: 'music', Docs: 'doc', Images: 'image' };
@@ -98,7 +98,7 @@ function CompletedLibrary({ items = [], onNavChange }) {
       position: 'relative', color: 'var(--ink-0)',
     }}>
       <div className="nx-aurora"/>
-      <ChromeBar/>
+      <ChromeBar onSettingsClick={onSettingsClick || (() => onNavChange && onNavChange('settings'))}/>
       <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative', zIndex: 1 }}>
         <Sidebar active="done" onNavChange={onNavChange} completed={items}/>
         <div style={{ flex: 1, padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16, overflow: 'hidden' }}>

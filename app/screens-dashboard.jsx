@@ -58,13 +58,14 @@ function Sidebar({ active = 'active', onNavChange, downloads = [], completed = [
     images:  completed.filter(d => d.kind === 'image').length,
   };
   const items = [
-    { id: 'active',  label: 'Active',    Icon: Icons.Bolt  },
-    { id: 'queue',   label: 'Queued',    Icon: Icons.Down  },
-    { id: 'done',    label: 'Completed', Icon: Icons.Check },
-    { id: 'video',   label: 'Video',     Icon: Icons.Video },
-    { id: 'music',   label: 'Music',     Icon: Icons.Music },
-    { id: 'docs',    label: 'Documents', Icon: Icons.Doc   },
-    { id: 'images',  label: 'Images',    Icon: Icons.Image },
+    { id: 'active',    label: 'Active',    Icon: Icons.Bolt     },
+    { id: 'queue',     label: 'Queued',    Icon: Icons.Down     },
+    { id: 'done',      label: 'Completed', Icon: Icons.Check    },
+    { id: 'video',     label: 'Video',     Icon: Icons.Video    },
+    { id: 'music',     label: 'Music',     Icon: Icons.Music    },
+    { id: 'docs',      label: 'Documents', Icon: Icons.Doc      },
+    { id: 'images',    label: 'Images',    Icon: Icons.Image    },
+    { id: 'settings',  label: 'Settings',  Icon: Icons.Settings },
   ];
   const usedPct = storageStats ? storageStats.usedPct : 0;
   const freeGb  = storageStats ? (storageStats.freeBytes / 1e9).toFixed(0) : '—';

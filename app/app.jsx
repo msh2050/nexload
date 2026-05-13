@@ -235,9 +235,9 @@ function App() {
   } else if (nav === 'done' || nav === 'video' || nav === 'music' || nav === 'docs' || nav === 'images') {
     const kindFilter = { video: 'video', music: 'music', docs: 'doc', images: 'image' }[nav];
     const items = kindFilter ? completed.filter(d => d.kind === kindFilter) : completed;
-    screen = <CompletedLibrary items={items} onNavChange={setNav}/>;
+    screen = <CompletedLibrary items={items} onNavChange={setNav} onSettingsClick={() => setNav('settings')}/>;
   } else if (activeDownloads.length === 0 && nav === 'active') {
-    screen = <EmptyState onGrab={handleGrab} pasteUrl={pasteUrl} onPasteChange={setPasteUrl}/>;
+    screen = <EmptyState onGrab={handleGrab} pasteUrl={pasteUrl} onPasteChange={setPasteUrl} onSettingsClick={() => setNav('settings')}/>;
   } else {
     screen = (
       <DashboardDark

@@ -10,8 +10,9 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Gio, Pango
 
 from .download_manager import DownloadManager, DEFAULT_DOWNLOAD_DIR
-from .downloader import Download, Status
+from .downloader import Download, Status, find_aria2c, find_axel
 from . import video_info
+from . import settings as _settings
 
 
 # ══════════════════════════════════════════════════════════ helpers
@@ -117,6 +118,147 @@ class FormatChooserDialog(Gtk.Dialog):
         if idx < len(self._formats):
             return self._formats[idx]
         return None
+
+
+# ══════════════════════════════════════════════════════════ settings dialog
+
+class SettingsDialog(Gtk.Dialog):
+    _DOWNLOADER_OPTIONS = [
+        ("auto",    "Auto (aria2c → axel → built-in)"),
+        ("aria2c",  "aria2c  — best for large files / torrents"),
+        ("axel",    "axel  — lightweight, fast HTTP"),
+        ("builtin", "Built-in  — no dependencies required"),
+    ]
+
+    def __init__(self, parent):
+        super().__init__(title="Settings", transient_for=parent, modal=True)
+        self.set_default_size(460, 0)
+
+        self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        btn = self.add_button("_Save", Gtk.ResponseType.OK)
+        btn.add_css_class("suggested-action")
+        self.set_default_response(Gtk.ResponseType.OK)
+
+        s = _settings.all_settings()
+
+        box = self.get_content_area()
+        box.set_margin_top(16); box.set_margin_bottom(16)
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_spacing(16)
+
+        # ── Downloader section
+        dl_frame = Gtk.Frame(label=" Downloader ")
+        dl_frame.set_label_align(0.02)
+        box.append(dl_frame)
+
+        dl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        dl_box.set_margin_top(10); dl_box.set_margin_bottom(10)
+        dl_box.set_margin_start(12); dl_box.set_margin_end(12)
+        dl_frame.set_child(dl_box)
+
+        # downloader combo
+        row = Gtk.Box(spacing=10)
+        row.append(Gtk.Label(label="Engine:", xalign=0, width_chars=14))
+        self._dl_combo = Gtk.DropDown()
+        opts = Gtk.StringList()
+        self._dl_keys = []
+        current_idx = 0
+        for i, (key, label) in enumerate(self._DOWNLOADER_OPTIONS):
+            opts.append(label)
+            self._dl_keys.append(key)
+            if key == s.get("downloader", "auto"):
+                current_idx = i
+        self._dl_combo.set_model(opts)
+        self._dl_combo.set_selected(current_idx)
+        self._dl_combo.set_hexpand(True)
+        row.append(self._dl_combo)
+        dl_box.append(row)
+
+        # status badges
+        status_box = Gtk.Box(spacing=16)
+        status_box.set_margin_start(14 + 10)
+        for tool, finder in (("aria2c", find_aria2c), ("axel", find_axel)):
+            found = finder() is not None
+            badge = Gtk.Label(
+                label=f"{'✓' if found else '✗'}  {tool}  {'installed' if found else 'not found'}",
+                xalign=0,
+            )
+            badge.add_css_class("dim-label")
+            if not found:
+                badge.add_css_class("error")
+            status_box.append(badge)
+        dl_box.append(status_box)
+
+        # connections
+        row2 = Gtk.Box(spacing=10)
+        row2.append(Gtk.Label(label="Connections:", xalign=0, width_chars=14))
+        adj = Gtk.Adjustment(
+            value=s.get("connections", 16),
+            lower=1, upper=64, step_increment=1, page_increment=4,
+        )
+        self._conn_spin = Gtk.SpinButton(adjustment=adj, numeric=True)
+        row2.append(self._conn_spin)
+        hint = Gtk.Label(label="parallel connections per download", xalign=0)
+        hint.add_css_class("dim-label")
+        row2.append(hint)
+        dl_box.append(row2)
+
+        # max retries (built-in only)
+        row3 = Gtk.Box(spacing=10)
+        row3.append(Gtk.Label(label="Max retries:", xalign=0, width_chars=14))
+        adj2 = Gtk.Adjustment(
+            value=s.get("max_retries", 8),
+            lower=0, upper=50, step_increment=1, page_increment=5,
+        )
+        self._retry_spin = Gtk.SpinButton(adjustment=adj2, numeric=True)
+        row3.append(self._retry_spin)
+        hint2 = Gtk.Label(label="for built-in downloader", xalign=0)
+        hint2.add_css_class("dim-label")
+        row3.append(hint2)
+        dl_box.append(row3)
+
+        # ── Download folder section
+        dir_frame = Gtk.Frame(label=" Default Download Folder ")
+        dir_frame.set_label_align(0.02)
+        box.append(dir_frame)
+
+        dir_box = Gtk.Box(spacing=8)
+        dir_box.set_margin_top(10); dir_box.set_margin_bottom(10)
+        dir_box.set_margin_start(12); dir_box.set_margin_end(12)
+        dir_frame.set_child(dir_box)
+
+        self._dir_path = s.get("download_dir", DEFAULT_DOWNLOAD_DIR)
+        self._dir_label = Gtk.Label(label=self._dir_path, xalign=0)
+        self._dir_label.set_hexpand(True)
+        self._dir_label.set_ellipsize(Pango.EllipsizeMode.START)
+        dir_box.append(self._dir_label)
+
+        browse = Gtk.Button(label="Browse…")
+        browse.connect("clicked", self._on_browse)
+        dir_box.append(browse)
+
+    def _on_browse(self, btn):
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose default download folder")
+        dialog.select_folder(self.get_root(), None, self._on_folder_chosen)
+
+    def _on_folder_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+            if folder:
+                self._dir_path = folder.get_path()
+                self._dir_label.set_text(self._dir_path)
+        except Exception:
+            pass
+
+    def get_values(self) -> dict:
+        idx = self._dl_combo.get_selected()
+        return {
+            "downloader":   self._dl_keys[idx],
+            "connections":  int(self._conn_spin.get_value()),
+            "max_retries":  int(self._retry_spin.get_value()),
+            "download_dir": self._dir_path,
+        }
 
 
 # ══════════════════════════════════════════════════════════ add download dialog
@@ -425,6 +567,11 @@ class NexLoadWindow(Gtk.ApplicationWindow):
         add_btn.connect("clicked", self._on_add_clicked)
         hb.pack_end(add_btn)
 
+        settings_btn = Gtk.Button(label="⚙")
+        settings_btn.set_tooltip_text("Settings")
+        settings_btn.connect("clicked", self._on_settings_clicked)
+        hb.pack_end(settings_btn)
+
         return hb
 
     def _build_toolbar(self):
@@ -472,6 +619,16 @@ class NexLoadWindow(Gtk.ApplicationWindow):
 
     def _on_add_clicked(self, btn):
         self._show_add_dialog()
+
+    def _on_settings_clicked(self, btn):
+        dialog = SettingsDialog(self)
+        dialog.connect("response", self._on_settings_response)
+        dialog.present()
+
+    def _on_settings_response(self, dialog, response):
+        if response == Gtk.ResponseType.OK:
+            _settings.save(dialog.get_values())
+        dialog.destroy()
 
     def _show_add_dialog(self, prefill_url="", referrer=""):
         dialog = AddDownloadDialog(self, prefill_url)

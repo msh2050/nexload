@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Nexload Sniffer",
+  "version": "0.1.0",
+  "description": "Detects downloadable videos and streams, sends them to Nexload.",
+  "permissions": ["webRequest", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Nexload Sniffer"
+  }
+}

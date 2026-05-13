@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Nexload</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ui:   'Geist', ui-sans-serif, system-ui, sans-serif;
+    --serif:'Instrument Serif', 'Times New Roman', serif;
+    --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    font-family: var(--ui);
+    background: #07070a;
+    color: #e8e8ea;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  * { box-sizing: border-box; }
+
+  /* ── Color tokens ─────────────────────────── */
+  /* Hex fallbacks first, then oklch if supported */
+  .nx-dark {
+    --bg-0: #07070a;
+    --bg-1: #0d0d12;
+    --bg-2: #14141c;
+    --ink-0: #f4f4f7;
+    --ink-1: #c9c9d1;
+    --ink-2: #8a8a96;
+    --ink-3: #5a5a66;
+    --line:  rgba(255,255,255,0.07);
+    --line-2:rgba(255,255,255,0.12);
+    --glass: rgba(20,20,28,0.55);
+    --glass-strong: rgba(28,28,40,0.72);
+    --teal:   #00d0af;
+    --teal-2: #009e87;
+    --violet: #9b7ff8;
+    --violet-2:#7c52f0;
+    --warn:   #e9a526;
+    --good:   #3fc985;
+  }
+  @supports (color: oklch(1 0 0)) {
+    .nx-dark {
+      --teal:   oklch(0.82 0.14 200);
+      --teal-2: oklch(0.70 0.16 205);
+      --violet: oklch(0.72 0.18 295);
+      --violet-2: oklch(0.62 0.20 290);
+      --warn:   oklch(0.78 0.14 60);
+      --good:   oklch(0.78 0.16 150);
+    }
+  }
+
+  .nx-light {
+    --bg-0: #f6f5f1;
+    --bg-1: #ffffff;
+    --bg-2: #ece9e2;
+    --ink-0: #15151a;
+    --ink-1: #3a3a44;
+    --ink-2: #6a6a76;
+    --ink-3: #9a9aa6;
+    --line:  rgba(0,0,0,0.06);
+    --line-2:rgba(0,0,0,0.10);
+    --glass: rgba(255,255,255,0.65);
+    --glass-strong: rgba(255,255,255,0.82);
+    --teal:   #006f6a;
+    --teal-2: #005c57;
+    --violet: #6b44cc;
+    --violet-2:#5536ac;
+    --warn:   #c27a00;
+    --good:   #1f9554;
+  }
+  @supports (color: oklch(1 0 0)) {
+    .nx-light {
+      --teal:   oklch(0.55 0.12 200);
+      --teal-2: oklch(0.50 0.14 210);
+      --violet: oklch(0.55 0.18 295);
+      --violet-2: oklch(0.48 0.20 290);
+      --warn:   oklch(0.65 0.14 60);
+      --good:   oklch(0.60 0.16 150);
+    }
+  }
+
+  /* Aurora blobs */
+  .nx-aurora {
+    position: absolute; inset: 0;
+    overflow: hidden; pointer-events: none; z-index: 0;
+  }
+  .nx-aurora::before, .nx-aurora::after {
+    content: ''; position: absolute; border-radius: 50%;
+    filter: blur(80px); opacity: 0.55;
+  }
+  .nx-dark .nx-aurora::before {
+    width: 540px; height: 540px;
+    background: radial-gradient(circle, #007a92 0%, transparent 60%);
+    top: -160px; left: -120px;
+  }
+  .nx-dark .nx-aurora::after {
+    width: 620px; height: 620px;
+    background: radial-gradient(circle, #4f25b0 0%, transparent 60%);
+    bottom: -220px; right: -180px;
+  }
+  @supports (color: oklch(1 0 0)) {
+    .nx-dark .nx-aurora::before {
+      background: radial-gradient(circle, oklch(0.55 0.22 205) 0%, transparent 60%);
+    }
+    .nx-dark .nx-aurora::after {
+      background: radial-gradient(circle, oklch(0.45 0.22 295) 0%, transparent 60%);
+    }
+  }
+
+  /* Glass card */
+  .glass {
+    background: var(--glass);
+    backdrop-filter: blur(28px) saturate(140%);
+    -webkit-backdrop-filter: blur(28px) saturate(140%);
+    border: 1px solid var(--line-2);
+    border-radius: 18px;
+  }
+
+  /* Film grain overlay */
+  .nx-grain::after {
+    content: ''; position: absolute; inset: 0;
+    pointer-events: none; opacity: 0.04; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.6'/></svg>");
+  }
+
+  /* Animations */
+  @keyframes nx-wave    { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+  @keyframes nx-pulse   { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+  @keyframes nx-orbit   { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @keyframes nx-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+  @keyframes nx-float   { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+  @keyframes nx-twinkle { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+
+  #app { width: 100vw; height: 100vh; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- React 18 + Babel standalone (no bundler) -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
+
+<!-- API bridge (plain JS, no JSX) -->
+<script src="lib/api.js"></script>
+
+<!-- UI components (JSX via Babel) -->
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="screens-dashboard.jsx"></script>
+<script type="text/babel" src="screens-widgets.jsx"></script>
+<script type="text/babel" src="screens-states.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>

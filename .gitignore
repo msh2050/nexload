@@ -15,3 +15,14 @@ venv/
 
 # Design reference samples (not part of the app)
 nexload-GII sample/
+
+# Rust/Tauri build artifacts
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Sidecar binaries (populated by setup.sh)
+src-tauri/binaries/
+
+# Node (if ever added)
+node_modules/

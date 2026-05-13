@@ -12,3 +12,6 @@ venv/
 .DS_Store
 *.nexload_tmp
 *.part*
+
+# Design reference samples (not part of the app)
+nexload-GII sample/
